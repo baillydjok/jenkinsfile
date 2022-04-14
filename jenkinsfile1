@@ -1,0 +1,162 @@
+currentBuild.displayName = "utm-service-#" + currentBuild.number 
+
+pipeline {
+    
+    agent any 
+  
+    environment {
+       
+        
+        REGISTRY_URL          = 'https://us.gcr.io'    
+        DEV_PROJECT_ID        = 'vc-dev-1'
+        INT_PROJECT_ID        = 'vc-infrastructure'
+        //PROD_PROJECT_ID     = ''
+        NAMESPACE             = 'viking-cloud'
+        IMAGE_NAME            = 'com.vikingcloud'
+        HOSTNAME              = 'us.gcr.io'
+        BRANCH_NAME           = 'viking-cloud'
+        DEV_CLUSTER           = 'app-cluster' 
+        //INT_CLUSTER           = ''
+        //PROD_CLUSTER          = ''
+        CLUSTER_ZONE          = 'us-central1-a' 
+        DEV_CRED              = 'secret-file-id'
+        INFRA_CRED            = 'secret-service-key-infra'
+        //PROD_CRED           = ''
+        VERSION               = '1.0.8-36'
+        SERVICE_NAME          = 'utm-service'
+        HELM_PATH             = '/var/lib/jenkins/workspace/utm-test1/helm'
+        HELM_CHART            = 'utm-service-app'
+        HELM_RELEASE          = 'utm-service-app'
+        
+        
+    }
+   
+    stages {
+
+        
+        stage('Cloning Git') {
+            steps {
+                
+                git credentialsId: '3b357a83-2a0a-4be1-9e75-03df945c6c8a', url: 'https://olanrewaju-sysnets@bitbucket.org/vikingcloud/utm-service.git', branch: 'master' 
+                
+            }
+        }
+  
+         
+        stage('Build') {
+            tools {
+               jdk "JDK 12"
+            }
+            steps {
+                script {
+                 
+                   sh './gradlew build'
+                   sh './gradlew docker'
+                   sh './gradlew version'
+
+                }
+            }
+        }
+        
+        
+        stage('Version') {
+            steps {
+                script {
+                    VERSION = sh (
+                        script: "./gradlew properties -q | grep \"calculated_version:\" | awk '{print \$2}'",
+                        returnStdout: true
+                    ).trim()
+                    sh "echo Building project in version: $VERSION"
+
+                }
+            }
+        }
+        
+        stage('Service Name') {
+            steps {
+                script {
+                    
+                    SERVICE_NAME = sh (
+                        script: "./gradlew properties -q | grep \"archivesBaseName:\" | awk '{print \$2}'",
+                        returnStdout: true
+                    ).trim()
+                    sh "echo Building project in NAME: $SERVICE_NAME"
+
+                }
+            }
+        }
+        
+            
+        stage('Push to Infra') {
+             
+            tools {
+               jdk "JDK 12"
+            }
+            
+            steps {
+            
+                script {
+                
+                    withCredentials([[$class: 'FileBinding', credentialsId: 'secret-service-key-infra', variable: 'INFRA_SECRET']]) {
+                        
+                        sh ' cat "$INFRA_SECRET" > xyz.json '
+                    
+                        sh ' docker login -u _json_key -p "$(cat xyz.json)" $REGISTRY_URL '
+                        
+                        sh ' docker tag $IMAGE_NAME/$SERVICE_NAME:$VERSION  $HOSTNAME/$INT_PROJECT_ID/$IMAGE_NAME/$SERVICE_NAME:$VERSION'
+                    
+                        sh ' docker push $HOSTNAME/$INT_PROJECT_ID/$IMAGE_NAME/$SERVICE_NAME:$VERSION'
+    
+                    }
+                }
+            }    
+        
+        }
+        
+        stage('Deploy to Dev Cluster') {
+            
+            steps {
+              
+                script {
+                
+                    withCredentials([[$class: 'FileBinding', credentialsId: 'secret-file-id', variable: 'DEV_SECRET']]) {
+                       
+                      sh "gcloud container clusters get-credentials $DEV_CLUSTER --zone $CLUSTER_ZONE --project $DEV_PROJECT_ID"
+                      sh "kubectl get all -n $NAMESPACE"
+                      sh "helm version"
+                      //sh " cd  $HELM_PATH   && helm install --namespace $NAMESPACE $HELM_CHART $HELM_RELEASE  "
+                      sh " cd $HELM_PATH  &&  helm upgrade --namespace $NAMESPACE  -f  utm-service-app/values.yaml  --set image.repository=$HOSTNAME/$DEV_PROJECT_ID/$IMAGE_NAME/$SERVICE_NAME --set image.tag=$VERSION   --install  $HELM_CHART $HELM_RELEASE "
+                                     
+
+                    }
+              
+                }
+            }    
+        } 
+        
+        stage('SonarQube analysis') {
+            
+            tools {
+               jdk "JDK 12"
+            }
+            
+            steps {
+                withSonarQubeEnv('sonar-instance') { // Will pick the global server connection you have configured
+                    sh './gradlew sonarqube'
+                }
+            }    
+        }
+        
+        stage("Quality Gate") {
+            
+            steps {
+                timeout(time: 1, unit: 'HOURS') {
+                    // Parameter indicates whether to set pipeline to UNSTABLE if Quality Gate fails
+                    // true = set pipeline to UNSTABLE, false = don't
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+        
+    }
+}
